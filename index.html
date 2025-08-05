@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NASA Sunburst Visualizer</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      text-align: center;
+    }
+    #download-buttons {
+      margin-bottom: 15px;
+    }
+    button {
+      margin: 0 5px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    #file-input {
+      margin-bottom: 20px;
+    }
+    #filters {
+      margin-bottom: 20px;
+    }
+    select {
+      margin: 0 10px;
+      padding: 4px;
+    }
+    #path-box {
+      height: 40px;
+      margin-bottom: 20px;
+      font-size: 18px;
+      font-weight: bold;
+      border: 2px solid #ccc;
+      padding: 10px;
+      width: 80%;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #container {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      flex-wrap: wrap;
+    }
+    #legend {
+      min-width: 250px;
+      text-align: left;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 10px;
+      gap: 8px;
+    }
+    .legend-color {
+      width: 20px;
+      height: 20px;
+      border: 1px solid #ccc;
+    }
+    .legend-labels {
+      display: flex;
+      flex-direction: column;
+    }
+    .legend-function {
+      font-weight: bold;
+    }
+    .legend-centers {
+      font-size: 12px;
+      color: #555;
+    }
+    svg {
+      width: 600px;
+      height: 600px;
+    }
+    #data-table {
+      margin-top: 40px;
+      border-collapse: collapse;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #data-table th, #data-table td {
+      border: 1px solid #ccc;
+      padding: 8px 16px;
+      text-align: left;
+    }
+    #data-table td.surface-cell {
+      font-weight: bold;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="download-buttons">
+    <button id="downloadImageBtn">Download Sunburst Image</button>
+    <button id="downloadTableBtn">Download Data Table as Excel</button>
+  </div>
+
+  <input type="file" id="file-input" accept=".csv" />
+  <div id="filters">
+    <label>Filter by Surface Function:</label>
+    <select id="surfaceFilter" multiple></select>
+    <label>Filter by Center:</label>
+    <select id="centerFilter" multiple></select>
+  </div>
+  <div id="path-box">Hover over a section to see its path</div>
+  <div id="container">
+    <div id="legend"></div>
+    <div id="chart"></div>
+  </div>
+  <div id="table-container"></div>
+
+  <!-- External libraries -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+  <script>
+    const colors = d3.schemeCategory10;
+    const unallocatedColor = "#000000";
+    const width = 600;
+    const radius = width / 2;
+
+    let surfaceColorMap = {};
+    let surfaceCentersMap = new Map();
+    let originalData = [];
+    let colorScale = d3.scaleOrdinal(colors);
+
+    const partition = d3.partition().size([2 * Math.PI, radius]);
+    const arc = d3.arc()
+      .startAngle(d => d.x0)
+      .endAngle(d => d.x1)
+      .innerRadius(d => d.y0)
+      .outerRadius(d => d.y1);
+
+    document.getElementById('file-input').addEventListener('change', function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function (event) {
+        const csvText = event.target.result;
+        originalData = d3.csvParse(csvText); // header-aware parsing
+        buildFilters(originalData);
+        updateVisualization();
+      };
+      reader.readAsText(file);
+    });
+
+    // Download Sunburst Image
+    document.getElementById('downloadImageBtn').addEventListener('click', () => {
+      const container = document.getElementById('container');
+      html2canvas(container).then(canvas => {
+        const link = document.createElement('a');
+        link.download = 'sunburst.png';
+        link.href = canvas.toDataURL();
+        link.click();
+      });
+    });
+
+    // Download Data Table as Excel
+    document.getElementById('downloadTableBtn').addEventListener('click', () => {
+      const table = document.getElementById('data-table');
+      if (!table) {
+        alert("No table data available to download.");
+        return;
+      }
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.table_to_sheet(table);
+      XLSX.utils.book_append_sheet(wb, ws, "Data Table");
+      XLSX.writeFile(wb, "sunburst_table.xlsx");
+    });
+
+    function getFilters() {
+      const surfaceVals = Array.from(document.getElementById('surfaceFilter').selectedOptions).map(o => o.value);
+      const centerVals = Array.from(document.getElementById('centerFilter').selectedOptions).map(o => o.value);
+      return { surfaceVals, centerVals };
+    }
+
+    function updateVisualization() {
+      clearAll();
+      const { surfaceVals, centerVals } = getFilters();
+      const { hierarchy, flatTable } = parseData(originalData, surfaceVals, centerVals);
+      drawSunburst(hierarchy);
+      buildLegend();
+      buildTable(flatTable);
+    }
+
+    function clearAll() {
+      d3.select("#chart").html("");
+      d3.select("#legend").html("");
+      d3.select("#table-container").html("");
+      surfaceColorMap = {};
+      surfaceCentersMap.clear();
+    }
+
+    function parseData(rows, surfaceFilter, centerFilter) {
+      const root = { name: "root", children: [] };
+      const flatTable = [];
+
+      rows.forEach(row => {
+        const surface = row["Name"]?.trim();
+        const centerList = row["Centers"] ? row["Centers"].split(",").map(c => c.trim()) : ["Unallocated"];
+        const useCases = row["Lunar Use Case SAO"] ? row["Lunar Use Case SAO"].split(",").map(u => u.trim()) : [];
+
+        const hasUnallocated = centerList.includes("Unallocated");
+        const color = hasUnallocated ? unallocatedColor : colorScale(surface);
+
+        if (
+          (surfaceFilter.length === 0 || surfaceFilter.includes(surface)) &&
+          (centerFilter.length === 0 || centerList.some(c => centerFilter.includes(c)))
+        ) {
+          surfaceColorMap[surface] = color;
+          surfaceCentersMap.set(surface, centerList);
+
+          centerList.forEach(center => {
+            useCases.forEach(uc => {
+              flatTable.push({ surface, centers: center, useCase: uc, color });
+            });
+          });
+
+          root.children.push({
+            name: surface,
+            children: centerList.map(center => ({
+              name: center,
+              children: useCases.map(u => ({ name: u }))
+            }))
+          });
+        }
+      });
+
+      root.children.sort((a, b) => b.children.length - a.children.length);
+      return { hierarchy: root, flatTable };
+    }
+
+    function buildFilters(rows) {
+      const surfaceSet = new Set();
+      const centerSet = new Set();
+
+      rows.forEach(row => {
+        if (!row["Name"]) return;
+        surfaceSet.add(row["Name"].trim());
+        if (row["Centers"]) {
+          row["Centers"].split(",").forEach(c => centerSet.add(c.trim()));
+        } else {
+          centerSet.add("Unallocated");
+        }
+      });
+
+      updateFilterOptions('surfaceFilter', Array.from(surfaceSet));
+      updateFilterOptions('centerFilter', Array.from(centerSet));
+    }
+
+    function updateFilterOptions(id, values) {
+      const select = document.getElementById(id);
+      select.innerHTML = "";
+      values.forEach(val => {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = val;
+        select.appendChild(opt);
+      });
+
+      if (!select.dataset.listenerAdded) {
+        select.addEventListener('change', updateVisualization);
+        select.dataset.listenerAdded = true;
+      }
+
+      // Right-click toggle
+      select.querySelectorAll('option').forEach(option => {
+        option.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          option.selected = !option.selected;
+          updateVisualization();
+        });
+      });
+    }
+
+    function drawSunburst(rootData) {
+      const root = d3.hierarchy(rootData)
+        .sum(d => d.children ? 0 : 1)
+        .sort((a, b) => b.value - a.value);
+
+      partition(root);
+
+      const svg = d3.select("#chart").append("svg")
+        .attr("viewBox", [0, 0, width, width])
+        .append("g")
+        .attr("transform", `translate(${radius},${radius})`);
+
+      const pathBox = d3.select("#path-box");
+
+      svg.selectAll("path")
+        .data(root.descendants().filter(d => d.depth))
+        .join("path")
+        .attr("d", arc)
+        .attr("fill", d => {
+          const surface = d.ancestors().reverse()[1]?.data.name;
+          return surfaceColorMap[surface] || "#ccc";
+        })
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 3)
+        .on("mouseover", (event, d) => {
+          const path = d.ancestors().reverse().slice(1).map(d => d.data.name).join(" > ");
+          pathBox.text(path);
+        });
+    }
+
+    function buildLegend() {
+      const legend = d3.select("#legend");
+      for (const [surface, color] of Object.entries(surfaceColorMap)) {
+        const centers = surfaceCentersMap.get(surface)?.join(", ") || "Unallocated";
+        const item = legend.append("div").attr("class", "legend-item");
+        item.append("div")
+          .attr("class", "legend-color")
+          .style("background-color", color);
+        const labels = item.append("div").attr("class", "legend-labels");
+        labels.append("div").attr("class", "legend-function").text(surface);
+        labels.append("div").attr("class", "legend-centers").text(centers);
+      }
+    }
+
+    function buildTable(data) {
+      const container = d3.select("#table-container");
+      const table = container.append("table").attr("id", "data-table");
+      const thead = table.append("thead").append("tr");
+      thead.append("th").text("Surface Function");
+      thead.append("th").text("Center");
+      thead.append("th").text("Use Case");
+
+      const tbody = table.append("tbody");
+      const grouped = d3.groups(data, d => d.surface);
+
+      grouped.forEach(([surface, rows]) => {
+        rows.forEach((row, i) => {
+          const tr = tbody.append("tr");
+          if (i === 0) {
+            tr.append("td")
+              .attr("rowspan", rows.length)
+              .attr("class", "surface-cell")
+              .style("background-color", row.color)
+              .text(surface);
+          }
+          tr.append("td").text(row.centers);
+          tr.append("td").text(row.useCase);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
