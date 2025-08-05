@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -201,31 +202,42 @@
 
       rows.forEach(row => {
         const surface = row["Name"]?.trim();
-        const centerList = row["Centers"] ? row["Centers"].split(",").map(c => c.trim()) : ["Unallocated"];
-        const useCases = row["Lunar Use Case SAO"] ? row["Lunar Use Case SAO"].split(",").map(u => u.trim()) : [];
+        const centerList = row["Centers"] 
+          ? row["Centers"].split(",").map(c => c.trim()) 
+          : ["Unallocated"];
+
+        // Split only where next segment starts with "UC"
+        const useCases = row["Lunar Use Case SAO"] 
+          ? row["Lunar Use Case SAO"].split(/,(?=UC)/).map(u => u.trim()) 
+          : [];
 
         const hasUnallocated = centerList.includes("Unallocated");
         const color = hasUnallocated ? unallocatedColor : colorScale(surface);
 
-        if (
-          (surfaceFilter.length === 0 || surfaceFilter.includes(surface)) &&
-          (centerFilter.length === 0 || centerList.some(c => centerFilter.includes(c)))
-        ) {
+        const passesSurfaceFilter = surfaceFilter.length === 0 || surfaceFilter.includes(surface);
+        const passesCenterFilter = centerFilter.length === 0 || centerList.some(c => centerFilter.includes(c));
+
+        if (passesSurfaceFilter && passesCenterFilter) {
           surfaceColorMap[surface] = color;
           surfaceCentersMap.set(surface, centerList);
 
+          // Table: centers
           centerList.forEach(center => {
-            useCases.forEach(uc => {
-              flatTable.push({ surface, centers: center, useCase: uc, color });
-            });
+            flatTable.push({ surface, centers: center, useCase: "", color });
           });
 
+          // Table: use cases
+          useCases.forEach(uc => {
+            flatTable.push({ surface, centers: "", useCase: uc, color });
+          });
+
+          // Hierarchy: Centers & Use Cases as siblings
           root.children.push({
             name: surface,
-            children: centerList.map(center => ({
-              name: center,
-              children: useCases.map(u => ({ name: u }))
-            }))
+            children: [
+              ...centerList.map(center => ({ name: center })),
+              ...useCases.map(uc => ({ name: uc }))
+            ]
           });
         }
       });
@@ -300,7 +312,7 @@
           return surfaceColorMap[surface] || "#ccc";
         })
         .attr("stroke", "#fff")
-        .attr("stroke-width", 3)
+        .attr("stroke-width", d => d.depth === 3 ? 1 : 3) // thinner for ring 3
         .on("mouseover", (event, d) => {
           const path = d.ancestors().reverse().slice(1).map(d => d.data.name).join(" > ");
           pathBox.text(path);
